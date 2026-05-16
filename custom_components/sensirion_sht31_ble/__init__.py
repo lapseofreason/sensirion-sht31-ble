@@ -13,7 +13,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import BATTERY_POLL_INTERVAL, DOMAIN
 
@@ -46,12 +47,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
 
     await sht31.poll_battery(ble_device, sht31_device)
 
-    coordinator = DataUpdateCoordinator(
+    coordinator: DataUpdateCoordinator[SHT31Device] = DataUpdateCoordinator(
         hass,
         _LOGGER,
         name=DOMAIN,
         update_method=None,
-        update_interval=timedelta(seconds=BATTERY_POLL_INTERVAL),
+        update_interval=None,
     )
     coordinator.async_set_updated_data(sht31_device)
 
@@ -68,21 +69,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
         ble_device, sht31_device, _on_notification, _resolve_ble_device, _on_disconnect
     )
 
-    async def _async_poll_battery():
-        """Poll battery level (does not support notifications)."""
-        ble_device = bluetooth.async_ble_device_from_address(hass, address)
-        if not ble_device:
-            raise UpdateFailed(
-                f"Could not find Sensirion SHT31 device with address {address}"
-            )
+    async def _async_poll_battery(_now=None):
+        """Poll battery level on a fixed interval."""
+        current_ble_device = bluetooth.async_ble_device_from_address(hass, address)
+        if not current_ble_device:
+            _LOGGER.warning("Could not find SHT31 device for battery poll")
+            return
         try:
-            await sht31.poll_battery(ble_device, sht31_device)
+            await sht31.poll_battery(current_ble_device, sht31_device)
+            coordinator.async_set_updated_data(sht31_device)
         except Exception as err:
-            raise UpdateFailed(f"Unable to fetch battery: {err}") from err
-        return sht31_device
+            _LOGGER.warning("Unable to fetch battery: %s", err)
 
-    coordinator.update_method = _async_poll_battery
-    await coordinator.async_config_entry_first_refresh()
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass, _async_poll_battery, timedelta(seconds=BATTERY_POLL_INTERVAL)
+        )
+    )
 
     entry.runtime_data = SHT31RuntimeData(coordinator=coordinator, client=sht31)
 
