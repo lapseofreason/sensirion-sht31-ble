@@ -29,8 +29,6 @@ TEMPERATURE_CHAR_UUID = "00002235-b38d-4985-720e-0f993a68ee41"
 RECONNECT_DELAY_S = 5
 MAX_RECONNECT_ATTEMPTS = 30
 MAX_RECONNECT_DELAY_S = 300
-GATT_READ_TIMEOUT_S = 5
-NOTIFICATION_QUARANTINE_S = 15
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,14 +61,13 @@ class SHT31BluetoothDeviceData:
         self._client: BleakClient | None = None
         self._notify_callback: Callable[[SHT31Device], None] | None = None
         self._battery_callback: Callable[[SHT31Device], None] | None = None
+        self._disconnect_callback: Callable[[], None] | None = None
         self._gave_up_callback: Callable[[], None] | None = None
         self._device: SHT31Device | None = None
         self._ble_device_resolver: Callable[[], BLEDevice | None] | None = None
         self._reconnect_task: asyncio.Task | None = None
         self._connect_lock: asyncio.Lock = asyncio.Lock()
         self._shutting_down: bool = False
-        self._notifications_trusted: bool = True
-        self._notification_received_during_quarantine: bool = False
 
     @property
     def is_connected(self) -> bool:
@@ -117,42 +114,13 @@ class SHT31BluetoothDeviceData:
             if self._reconnect_task and not self._reconnect_task.done():
                 _LOGGER.debug("%s: reconnect already running, skipping", self._address)
                 return
-            _LOGGER.debug("%s: scheduling reconnect (trusted)", self._address)
-            self._schedule_on_loop(self._start_reconnect_trusted)
+            if self._disconnect_callback:
+                self._schedule_on_loop(self._disconnect_callback)
+            self._reconnect_task = asyncio.ensure_future(
+                self._reconnect_and_resubscribe()
+            )
 
-    def _start_reconnect_trusted(self) -> None:
-        """Start reconnect without quarantine (bleak confirmed disconnect)."""
-        if self._shutting_down:
-            return
-        if self._reconnect_task and not self._reconnect_task.done():
-            return
-        self._reconnect_task = asyncio.ensure_future(
-            self._reconnect_and_resubscribe(quarantine=False)
-        )
-
-    def _start_reconnect(self) -> None:
-        """Start reconnect with quarantine (zombie/staleness path)."""
-        if self._shutting_down:
-            return
-        if self._reconnect_task and not self._reconnect_task.done():
-            return
-        self._reconnect_task = asyncio.ensure_future(
-            self._reconnect_and_resubscribe(quarantine=True)
-        )
-
-    def trigger_reconnect(self) -> None:
-        """Abandon a possibly-zombie connection and start reconnecting."""
-        if self._shutting_down:
-            _LOGGER.debug("%s: trigger_reconnect ignored (shutting down)", self._address)
-            return
-        if self._reconnect_task and not self._reconnect_task.done():
-            _LOGGER.debug("%s: trigger_reconnect ignored (reconnect already running)", self._address)
-            return
-        _LOGGER.debug("%s: trigger_reconnect, orphaning client", self._address)
-        self._client = None
-        self._start_reconnect()
-
-    async def _reconnect_and_resubscribe(self, quarantine: bool = True) -> None:
+    async def _reconnect_and_resubscribe(self) -> None:
         attempt = 0
         while not self._shutting_down and attempt < MAX_RECONNECT_ATTEMPTS:
             delay = min(RECONNECT_DELAY_S * (2 ** attempt), MAX_RECONNECT_DELAY_S)
@@ -164,42 +132,14 @@ class SHT31BluetoothDeviceData:
                     _LOGGER.debug("%s: reconnect %d/%d, device not found by resolver", self._address, attempt, MAX_RECONNECT_ATTEMPTS)
                     continue
                 client = await self._ensure_connected(ble_device)
-                async with asyncio.timeout(GATT_READ_TIMEOUT_S):
-                    await self._get_battery(client, self._device)
-                if self._battery_callback:
-                    self._schedule_on_loop(self._battery_callback, self._device)
-                self._notifications_trusted = not quarantine
-                self._notification_received_during_quarantine = False
                 await self._subscribe(ble_device, self._device)
-                if not quarantine:
-                    if self._notify_callback:
-                        self._notify_callback(self._device)
-                    _LOGGER.info("Reconnected to %s (attempt %d/%d)", self._address, attempt, MAX_RECONNECT_ATTEMPTS)
-                    return
-                _LOGGER.debug("%s: reconnect %d/%d, quarantine phase 1 (buffer flush)", self._address, attempt, MAX_RECONNECT_ATTEMPTS)
-                await asyncio.sleep(NOTIFICATION_QUARANTINE_S)
-                if self._shutting_down:
-                    return
-                _LOGGER.debug("%s: reconnect %d/%d, phase 1 done (got_notification=%s)", self._address, attempt, MAX_RECONNECT_ATTEMPTS, self._notification_received_during_quarantine)
-                self._notification_received_during_quarantine = False
-                await asyncio.sleep(NOTIFICATION_QUARANTINE_S)
-                if self._shutting_down:
-                    return
-                _LOGGER.debug("%s: reconnect %d/%d, phase 2 done (got_notification=%s)", self._address, attempt, MAX_RECONNECT_ATTEMPTS, self._notification_received_during_quarantine)
-                self._notifications_trusted = True
-                if not self._notification_received_during_quarantine:
-                    _LOGGER.debug("%s: reconnect %d/%d, no notifications in phase 2 (phantom connection)", self._address, attempt, MAX_RECONNECT_ATTEMPTS)
-                    self._client = None
-                    continue
                 if self._notify_callback:
                     self._notify_callback(self._device)
                 _LOGGER.info("Reconnected to %s (attempt %d/%d)", self._address, attempt, MAX_RECONNECT_ATTEMPTS)
                 return
-            except TimeoutError:
-                _LOGGER.debug("%s: reconnect %d/%d, GATT read timed out (phantom connection)", self._address, attempt, MAX_RECONNECT_ATTEMPTS)
-                self._client = None
             except Exception as err:
                 _LOGGER.debug("%s: reconnect %d/%d failed: %s", self._address, attempt, MAX_RECONNECT_ATTEMPTS, err)
+                self._client = None
 
         if not self._shutting_down:
             _LOGGER.error("Gave up reconnecting to %s after %d attempts", self._address, MAX_RECONNECT_ATTEMPTS)
@@ -267,9 +207,6 @@ class SHT31BluetoothDeviceData:
         if value is None:
             return
         self._device.sensors["temperature"] = value
-        if not self._notifications_trusted:
-            self._notification_received_during_quarantine = True
-            return
         if self._notify_callback:
             self._schedule_on_loop(self._notify_callback, self._device)
 
@@ -280,9 +217,6 @@ class SHT31BluetoothDeviceData:
         if value is None:
             return
         self._device.sensors["humidity"] = value
-        if not self._notifications_trusted:
-            self._notification_received_during_quarantine = True
-            return
         if self._notify_callback:
             self._schedule_on_loop(self._notify_callback, self._device)
 
@@ -301,6 +235,7 @@ class SHT31BluetoothDeviceData:
         ble_device_resolver: Callable[[], BLEDevice | None],
         gave_up_callback: Callable[[], None] | None = None,
         battery_callback: Callable[[SHT31Device], None] | None = None,
+        disconnect_callback: Callable[[], None] | None = None,
     ) -> None:
         """Subscribe to temperature and humidity notifications.
 
@@ -311,6 +246,7 @@ class SHT31BluetoothDeviceData:
         self._device = device
         self._notify_callback = notify_callback
         self._battery_callback = battery_callback
+        self._disconnect_callback = disconnect_callback
         self._gave_up_callback = gave_up_callback
 
         client = await self._ensure_connected(ble_device)
@@ -349,3 +285,5 @@ class SHT31BluetoothDeviceData:
         else:
             raise BleakError("No BLE device provided and no existing connection")
         await self._get_battery(client, device)
+        if self._battery_callback:
+            self._schedule_on_loop(self._battery_callback, device)

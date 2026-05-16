@@ -14,9 +14,7 @@ from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
     CONF_BATTERY_POLL_INTERVAL,
-    CONF_STALENESS_TIMEOUT,
     DEFAULT_BATTERY_POLL_INTERVAL,
-    DEFAULT_STALENESS_TIMEOUT,
     DOMAIN,
 )
 
@@ -41,12 +39,6 @@ class SHT31OptionsFlow(OptionsFlow):
                             CONF_BATTERY_POLL_INTERVAL, DEFAULT_BATTERY_POLL_INTERVAL
                         ),
                     ): vol.All(int, vol.Range(min=60, max=86400)),
-                    vol.Required(
-                        CONF_STALENESS_TIMEOUT,
-                        default=self.config_entry.options.get(
-                            CONF_STALENESS_TIMEOUT, DEFAULT_STALENESS_TIMEOUT
-                        ),
-                    ): vol.All(int, vol.Range(min=30, max=600)),
                 }
             ),
         )
