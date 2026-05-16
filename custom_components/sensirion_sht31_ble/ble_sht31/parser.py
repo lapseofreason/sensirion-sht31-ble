@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import struct
 import logging
-from typing import Optional
+from collections.abc import Callable
 
 from bleak import BleakClient, BleakError
 from bleak.backends.device import BLEDevice
 from bleak_retry_connector import establish_connection
 
-DEVICE_INFO_UUID = "180A"
 DEVICE_INFO_CHAR_UUIDS = {
     "00002a23-0000-1000-8000-00805f9b34fb": "identifier",
     "00002a24-0000-1000-8000-00805f9b34fb": "model",
@@ -21,12 +21,11 @@ DEVICE_INFO_CHAR_UUIDS = {
     "00002a28-0000-1000-8000-00805f9b34fb": "software_revision",
     "00002a29-0000-1000-8000-00805f9b34fb": "manufacturer",
 }
-BATTERY_UUID = "180F"
 BATTERY_CHAR_UUID = "2A19"
-HUMIDITY_UUID = "00001234-b38d-4985-720e-0f993a68ee41"
 HUMIDITY_CHAR_UUID = "00001235-b38d-4985-720e-0f993a68ee41"
-TEMPERATURE_UUID = "00002234-b38d-4985-720e-0f993a68ee41"
 TEMPERATURE_CHAR_UUID = "00002235-b38d-4985-720e-0f993a68ee41"
+
+RECONNECT_DELAY_S = 5
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,21 +55,59 @@ class SHT31BluetoothDeviceData:
     def __init__(self):
         super().__init__()
         self._client: BleakClient | None = None
+        self._notify_callback: Callable[[SHT31Device], None] | None = None
+        self._disconnect_callback: Callable[[], None] | None = None
+        self._device: SHT31Device | None = None
+        self._ble_device_resolver: Callable[[], BLEDevice | None] | None = None
+        self._reconnect_task: asyncio.Task | None = None
+        self._connect_lock: asyncio.Lock = asyncio.Lock()
+        self._shutting_down: bool = False
 
     @property
     def is_connected(self) -> bool:
         return self._client is not None and self._client.is_connected
 
     async def _ensure_connected(self, ble_device: BLEDevice) -> BleakClient:
-        if self.is_connected:
+        async with self._connect_lock:
+            if self.is_connected:
+                return self._client
+            _LOGGER.debug("Establishing BLE connection to %s", ble_device.address)
+            self._client = await establish_connection(
+                BleakClient, ble_device, ble_device.address
+            )
             return self._client
-        _LOGGER.debug("Establishing BLE connection to %s", ble_device.address)
-        self._client = await establish_connection(
-            BleakClient, ble_device, ble_device.address
-        )
-        return self._client
+
+    def _on_disconnected(self, _client: BleakClient) -> None:
+        address = _client.address if _client else "unknown"
+        _LOGGER.warning("BLE connection lost to %s", address)
+        self._client = None
+        if self._shutting_down:
+            return
+        if self._disconnect_callback:
+            self._disconnect_callback()
+        if self._notify_callback and self._ble_device_resolver and self._device:
+            self._reconnect_task = asyncio.ensure_future(
+                self._reconnect_and_resubscribe()
+            )
+
+    async def _reconnect_and_resubscribe(self) -> None:
+        while not self._shutting_down:
+            await asyncio.sleep(RECONNECT_DELAY_S)
+            try:
+                ble_device = self._ble_device_resolver()
+                if ble_device is None:
+                    _LOGGER.debug("Device not found by resolver, will retry")
+                    continue
+                await self._subscribe(ble_device, self._device)
+                _LOGGER.info("Reconnected and resubscribed to %s", ble_device.address)
+                return
+            except Exception as err:
+                _LOGGER.debug("Reconnect attempt failed: %s", err)
 
     async def disconnect(self) -> None:
+        self._shutting_down = True
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
         if self._client and self._client.is_connected:
             await self._client.disconnect()
         self._client = None
@@ -97,13 +134,54 @@ class SHT31BluetoothDeviceData:
         battery_level = await client.read_gatt_char(BATTERY_CHAR_UUID)
         device.sensors["battery"] = int(battery_level[0])
 
-    async def _get_humidity(self, client: BleakClient, device: SHT31Device) -> None:
+    def _on_temperature_notification(self, _sender: int, data: bytearray) -> None:
+        if self._device is None:
+            return
+        self._device.sensors["temperature"] = self.decode_temperature(data)
+        if self._notify_callback:
+            self._notify_callback(self._device)
+
+    def _on_humidity_notification(self, _sender: int, data: bytearray) -> None:
+        if self._device is None:
+            return
+        self._device.sensors["humidity"] = self.decode_humidity(data)
+        if self._notify_callback:
+            self._notify_callback(self._device)
+
+    async def _subscribe(self, ble_device: BLEDevice, device: SHT31Device) -> None:
+        """Connect, subscribe to notifications, and arm the disconnect handler."""
+        client = await self._ensure_connected(ble_device)
+        await client.start_notify(TEMPERATURE_CHAR_UUID, self._on_temperature_notification)
+        await client.start_notify(HUMIDITY_CHAR_UUID, self._on_humidity_notification)
+        client.set_disconnected_callback(self._on_disconnected)
+        _LOGGER.debug("Subscribed to notifications on %s", ble_device.address)
+
+    async def subscribe_notifications(
+        self,
+        ble_device: BLEDevice,
+        device: SHT31Device,
+        notify_callback: Callable[[SHT31Device], None],
+        ble_device_resolver: Callable[[], BLEDevice | None],
+        disconnect_callback: Callable[[], None] | None = None,
+    ) -> None:
+        """Subscribe to temperature and humidity notifications.
+
+        Performs an initial read to seed sensor values before subscribing.
+        On disconnection, automatically reconnects and resubscribes.
+        """
+        self._ble_device_resolver = ble_device_resolver
+        self._device = device
+        self._notify_callback = notify_callback
+        self._disconnect_callback = disconnect_callback
+
+        client = await self._ensure_connected(ble_device)
+
+        temperature_data = await client.read_gatt_char(TEMPERATURE_CHAR_UUID)
+        device.sensors["temperature"] = self.decode_temperature(temperature_data)
         humidity_data = await client.read_gatt_char(HUMIDITY_CHAR_UUID)
         device.sensors["humidity"] = self.decode_humidity(humidity_data)
 
-    async def _get_temperature(self, client: BleakClient, device: SHT31Device) -> None:
-        temperature_data = await client.read_gatt_char(TEMPERATURE_CHAR_UUID)
-        device.sensors["temperature"] = self.decode_temperature(temperature_data)
+        await self._subscribe(ble_device, device)
 
     async def initialize_device(self, ble_device: BLEDevice) -> SHT31Device:
         """Connects and retrieves device info, keeping the connection open."""
@@ -117,21 +195,8 @@ class SHT31BluetoothDeviceData:
 
         return device
 
-    async def update_device(
-        self, ble_device: BLEDevice, sht31_device: Optional[SHT31Device] = None
-    ) -> SHT31Device:
-        """Reads sensor data, reconnecting if needed."""
+    async def poll_battery(self, ble_device: BLEDevice, device: SHT31Device) -> None:
+        """Read battery level (does not support notifications)."""
         client = await self._ensure_connected(ble_device)
-        if sht31_device is not None:
-            device = sht31_device
-        else:
-            device = SHT31Device()
-            device.name = "Sensirion SHT31"
-            device.advertised_name = ble_device.name
-            device.address = ble_device.address
-
         await self._get_battery(client, device)
-        await self._get_humidity(client, device)
-        await self._get_temperature(client, device)
 
-        return device
