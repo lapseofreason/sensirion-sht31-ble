@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import timedelta
 import logging
 
@@ -18,9 +19,16 @@ from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
-type SHT31ConfigEntry = ConfigEntry[DataUpdateCoordinator[SHT31Device]]
-
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass
+class SHT31RuntimeData:
+    coordinator: DataUpdateCoordinator[SHT31Device]
+    client: SHT31BluetoothDeviceData
+
+
+type SHT31ConfigEntry = ConfigEntry[SHT31RuntimeData]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> bool:
@@ -33,12 +41,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
         raise ConfigEntryNotReady(
             f"Could not find Sensirion SHT31 device with address {address}"
         )
-    sht31 = SHT31BluetoothDeviceData(_LOGGER)
+    sht31 = SHT31BluetoothDeviceData()
     sht31_device = await sht31.initialize_device(ble_device)
 
     async def _async_update_method():
         """Get data from Sensirion SHT31 BLE."""
         ble_device = bluetooth.async_ble_device_from_address(hass, address)
+        if not ble_device:
+            raise UpdateFailed(
+                f"Could not find Sensirion SHT31 device with address {address}"
+            )
 
         try:
             data = await sht31.update_device(ble_device, sht31_device=sht31_device)
@@ -57,7 +69,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
 
     await coordinator.async_config_entry_first_refresh()
 
-    entry.runtime_data = coordinator
+    entry.runtime_data = SHT31RuntimeData(coordinator=coordinator, client=sht31)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -66,4 +78,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
 
 async def async_unload_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> bool:
     """Unload a config entry."""
+    try:
+        await entry.runtime_data.client.disconnect()
+    except Exception:
+        _LOGGER.debug("Error disconnecting BLE client during unload", exc_info=True)
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

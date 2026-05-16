@@ -16,6 +16,10 @@ For other Sensision sensors, see the [Home Assistant Sensirion BLE Integration](
 The default update interval can be set in: `custom_components/sensirion_sht31_ble/const.py`
 Currently set to 300 seconds (5 minutes). Change the value and restart homeassistant if want more or less often.
 
+## Battery
+
+This integration keeps a persistent BLE connection to the device rather than reconnecting on each poll. This avoids continuous BLE advertising on the device and eliminates repeated connection handshakes, significantly reducing battery drain.
+
 ## Development
 
 Useful links:

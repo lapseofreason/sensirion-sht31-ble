@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 
 from .ble_sht31 import SHT31Device
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -25,7 +24,10 @@ from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
 )
 
-type SHT31ConfigEntry = ConfigEntry[DataUpdateCoordinator[SHT31Device]]
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from . import SHT31ConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,7 +62,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the SHT31 BLE sensors."""
-    coordinator = entry.runtime_data
+    coordinator = entry.runtime_data.coordinator
     entities = []
     _LOGGER.debug("got sensors: %s", coordinator.data.sensors)
     for sensor_type, sensor_value in coordinator.data.sensors.items():

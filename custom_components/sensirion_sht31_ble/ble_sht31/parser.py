@@ -53,25 +53,35 @@ class SHT31Device:
 class SHT31BluetoothDeviceData:
     """Data for Sensirion SHT31 BLE sensors."""
 
-    def __init__(
-        self,
-        logger: logging.Logger,
-    ):
+    def __init__(self):
         super().__init__()
-        self.logger = logger
-        self.logger.debug("In Device Data")
+        self._client: BleakClient | None = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._client is not None and self._client.is_connected
+
+    async def _ensure_connected(self, ble_device: BLEDevice) -> BleakClient:
+        if self.is_connected:
+            return self._client
+        _LOGGER.debug("Establishing BLE connection to %s", ble_device.address)
+        self._client = await establish_connection(
+            BleakClient, ble_device, ble_device.address
+        )
+        return self._client
+
+    async def disconnect(self) -> None:
+        if self._client and self._client.is_connected:
+            await self._client.disconnect()
+        self._client = None
 
     def decode_temperature(self, data: bytes) -> float:
-        temperature = struct.unpack("<f", data)[0]
-        return round(temperature, 2)
+        return round(struct.unpack("<f", data)[0], 2)
 
     def decode_humidity(self, data: bytes) -> float:
-        humidity = struct.unpack("<f", data)[0]
-        return round(humidity, 2)
+        return round(struct.unpack("<f", data)[0], 2)
 
     async def _get_device_info(self, client: BleakClient, device: SHT31Device) -> None:
-        _LOGGER.debug("Getting Device Info")
-
         for char_uuid, attribute in DEVICE_INFO_CHAR_UUIDS.items():
             try:
                 value = await client.read_gatt_char(char_uuid)
@@ -80,71 +90,48 @@ class SHT31BluetoothDeviceData:
                 else:
                     decoded_value = value.decode("utf-8").rstrip("\x00")
                 setattr(device, attribute, decoded_value)
-                _LOGGER.debug(f"Got {attribute}: {decoded_value}")
             except BleakError as e:
                 _LOGGER.error(f"Error reading {attribute}: {e}")
 
     async def _get_battery(self, client: BleakClient, device: SHT31Device) -> None:
-        _LOGGER.debug("Getting Battery Level")
         battery_level = await client.read_gatt_char(BATTERY_CHAR_UUID)
         device.sensors["battery"] = int(battery_level[0])
 
     async def _get_humidity(self, client: BleakClient, device: SHT31Device) -> None:
-        _LOGGER.debug("Getting Humidity")
         humidity_data = await client.read_gatt_char(HUMIDITY_CHAR_UUID)
         device.sensors["humidity"] = self.decode_humidity(humidity_data)
 
     async def _get_temperature(self, client: BleakClient, device: SHT31Device) -> None:
-        _LOGGER.debug("Getting Temperature")
         temperature_data = await client.read_gatt_char(TEMPERATURE_CHAR_UUID)
         device.sensors["temperature"] = self.decode_temperature(temperature_data)
 
     async def initialize_device(self, ble_device: BLEDevice) -> SHT31Device:
-        """Initializes the device by retrieving device info"""
-        _LOGGER.debug("Initializing Device")
-        client = await establish_connection(BleakClient, ble_device, ble_device.address)
-        _LOGGER.debug("Got Client")
+        """Connects and retrieves device info, keeping the connection open."""
+        client = await self._ensure_connected(ble_device)
         device = SHT31Device()
-        _LOGGER.debug("Made Device")
 
-        try:
-            await self._get_device_info(client, device)
-            device.name = "Sensirion SHT31"
-            device.advertised_name = ble_device.name
-            device.address = ble_device.address
-            _LOGGER.debug("device.name: %s", device.name)
-            _LOGGER.debug("device.advertised_name: %s", device.advertised_name)
-            _LOGGER.debug("device.address: %s", device.address)
-        finally:
-            await client.disconnect()
+        await self._get_device_info(client, device)
+        device.name = "Sensirion SHT31"
+        device.advertised_name = ble_device.name
+        device.address = ble_device.address
 
         return device
 
     async def update_device(
         self, ble_device: BLEDevice, sht31_device: Optional[SHT31Device] = None
     ) -> SHT31Device:
-        """Connects to the device through BLE and retrieves relevant data"""
-        _LOGGER.debug("Update Device")
-        client = await establish_connection(BleakClient, ble_device, ble_device.address)
-        _LOGGER.debug("Got Client")
+        """Reads sensor data, reconnecting if needed."""
+        client = await self._ensure_connected(ble_device)
         if sht31_device is not None:
             device = sht31_device
         else:
             device = SHT31Device()
-        _LOGGER.debug("Made Device")
+            device.name = "Sensirion SHT31"
+            device.advertised_name = ble_device.name
+            device.address = ble_device.address
 
-        try:
-            await self._get_battery(client, device)
-            await self._get_humidity(client, device)
-            await self._get_temperature(client, device)
-            if sht31_device is None:
-                device.name = "Sensirion SHT31"
-                device.advertised_name = ble_device.name
-                device.address = ble_device.address
-            _LOGGER.debug("device.name: %s", device.name)
-            _LOGGER.debug("device.advertised_name: %s", device.advertised_name)
-            _LOGGER.debug("device.address: %s", device.address)
-        finally:
-            await client.disconnect()
+        await self._get_battery(client, device)
+        await self._get_humidity(client, device)
+        await self._get_temperature(client, device)
 
         return device
