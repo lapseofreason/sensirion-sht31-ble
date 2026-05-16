@@ -26,9 +26,8 @@ BATTERY_CHAR_UUID = "2A19"
 HUMIDITY_CHAR_UUID = "00001235-b38d-4985-720e-0f993a68ee41"
 TEMPERATURE_CHAR_UUID = "00002235-b38d-4985-720e-0f993a68ee41"
 
-RECONNECT_DELAY_S = 5
-MAX_RECONNECT_ATTEMPTS = 30
-MAX_RECONNECT_DELAY_S = 300
+RECONNECT_INTERVAL_S = 10
+MAX_RECONNECT_ATTEMPTS = 90
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -114,17 +113,23 @@ class SHT31BluetoothDeviceData:
             if self._reconnect_task and not self._reconnect_task.done():
                 _LOGGER.debug("%s: reconnect already running, skipping", self._address)
                 return
-            if self._disconnect_callback:
-                self._schedule_on_loop(self._disconnect_callback)
-            self._reconnect_task = asyncio.ensure_future(
-                self._reconnect_and_resubscribe()
-            )
+            self._schedule_on_loop(self._start_reconnect)
+
+    def _start_reconnect(self) -> None:
+        if self._shutting_down:
+            return
+        if self._reconnect_task and not self._reconnect_task.done():
+            return
+        if self._disconnect_callback:
+            self._disconnect_callback()
+        self._reconnect_task = asyncio.ensure_future(
+            self._reconnect_and_resubscribe()
+        )
 
     async def _reconnect_and_resubscribe(self) -> None:
         attempt = 0
         while not self._shutting_down and attempt < MAX_RECONNECT_ATTEMPTS:
-            delay = min(RECONNECT_DELAY_S * (2 ** attempt), MAX_RECONNECT_DELAY_S)
-            await asyncio.sleep(delay)
+            await asyncio.sleep(RECONNECT_INTERVAL_S)
             attempt += 1
             try:
                 ble_device = self._ble_device_resolver()

@@ -24,7 +24,7 @@ from .const import (
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
-DISCONNECT_GRACE_PERIOD_S = 15
+DISCONNECT_GRACE_PERIOD_S = 60
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -89,13 +89,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
             grace_timer_cancel()
             grace_timer_cancel = None
 
+    def _mark_unavailable() -> None:
+        err = ConnectionError(f"SHT31 BLE device {address} is unavailable")
+        coordinator.async_set_update_error(err)
+        battery_coordinator.async_set_update_error(err)
+
     def _on_grace_expired(_now=None) -> None:
         nonlocal grace_timer_cancel
         grace_timer_cancel = None
         _LOGGER.warning("SHT31 BLE device %s: not reconnected within %ds, marking unavailable", address, DISCONNECT_GRACE_PERIOD_S)
-        err = ConnectionError(f"SHT31 BLE device {address} is unavailable")
-        coordinator.async_set_update_error(err)
-        battery_coordinator.async_set_update_error(err)
+        hass.loop.call_soon_threadsafe(_mark_unavailable)
 
     def _on_disconnected() -> None:
         nonlocal grace_timer_cancel
@@ -112,11 +115,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
         battery_coordinator.async_set_updated_data(device)
 
     def _on_gave_up() -> None:
-        _cancel_grace_timer()
-        err = ConnectionError(f"SHT31 BLE device {address} is unavailable")
-        coordinator.async_set_update_error(err)
-        battery_coordinator.async_set_update_error(err)
-        _LOGGER.error("SHT31 BLE device %s: reconnect attempts exhausted", address)
+        def _do_gave_up():
+            _cancel_grace_timer()
+            _mark_unavailable()
+            _LOGGER.error("SHT31 BLE device %s: reconnect attempts exhausted", address)
+        hass.loop.call_soon_threadsafe(_do_gave_up)
 
     def _resolve_ble_device():
         return bluetooth.async_ble_device_from_address(hass, address)
