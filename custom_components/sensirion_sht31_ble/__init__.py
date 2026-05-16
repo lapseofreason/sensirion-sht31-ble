@@ -11,12 +11,12 @@ from .ble_sht31 import SHT31BluetoothDeviceData, SHT31Device
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import BATTERY_POLL_INTERVAL, DOMAIN
+from .const import BATTERY_POLL_INTERVAL, DOMAIN, UNAVAILABLE_GRACE_PERIOD
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
@@ -45,7 +45,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
     sht31 = SHT31BluetoothDeviceData()
     sht31_device = await sht31.initialize_device(ble_device)
 
-    await sht31.poll_battery(ble_device, sht31_device)
+    try:
+        await sht31.poll_battery(ble_device, sht31_device)
+    except Exception:
+        _LOGGER.debug("Initial battery read failed, will retry on next poll", exc_info=True)
 
     coordinator: DataUpdateCoordinator[SHT31Device] = DataUpdateCoordinator(
         hass,
@@ -56,17 +59,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
     )
     coordinator.async_set_updated_data(sht31_device)
 
+    grace_timer_cancel: CALLBACK_TYPE | None = None
+
+    def _cancel_grace_timer() -> None:
+        nonlocal grace_timer_cancel
+        if grace_timer_cancel is not None:
+            grace_timer_cancel()
+            grace_timer_cancel = None
+
+    def _mark_unavailable(_now=None) -> None:
+        nonlocal grace_timer_cancel
+        grace_timer_cancel = None
+        coordinator.async_set_update_error(
+            ConnectionError(f"SHT31 BLE device {address} is unavailable")
+        )
+
     def _on_notification(device: SHT31Device) -> None:
+        _cancel_grace_timer()
         coordinator.async_set_updated_data(device)
 
     def _on_disconnect() -> None:
+        nonlocal grace_timer_cancel
         _LOGGER.warning("SHT31 BLE disconnected, attempting reconnect")
+        if grace_timer_cancel is None:
+            grace_timer_cancel = async_call_later(
+                hass, UNAVAILABLE_GRACE_PERIOD, _mark_unavailable
+            )
+
+    def _on_gave_up() -> None:
+        _cancel_grace_timer()
+        _mark_unavailable()
+        _LOGGER.error("SHT31 BLE device %s: reconnect attempts exhausted", address)
 
     def _resolve_ble_device():
         return bluetooth.async_ble_device_from_address(hass, address)
 
     await sht31.subscribe_notifications(
-        ble_device, sht31_device, _on_notification, _resolve_ble_device, _on_disconnect
+        ble_device,
+        sht31_device,
+        _on_notification,
+        _resolve_ble_device,
+        _on_disconnect,
+        _on_gave_up,
     )
 
     async def _async_poll_battery(_now=None):
@@ -86,6 +120,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
             hass, _async_poll_battery, timedelta(seconds=BATTERY_POLL_INTERVAL)
         )
     )
+    entry.async_on_unload(_cancel_grace_timer)
 
     entry.runtime_data = SHT31RuntimeData(coordinator=coordinator, client=sht31)
 
