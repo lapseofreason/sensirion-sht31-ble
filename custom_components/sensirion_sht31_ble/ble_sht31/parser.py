@@ -7,7 +7,7 @@ import struct
 import logging
 from typing import Optional
 
-from bleak import BleakClient
+from bleak import BleakClient, BleakError
 from bleak.backends.device import BLEDevice
 from bleak_retry_connector import establish_connection
 
@@ -81,7 +81,7 @@ class SHT31BluetoothDeviceData:
                     decoded_value = value.decode("utf-8").rstrip("\x00")
                 setattr(device, attribute, decoded_value)
                 _LOGGER.debug(f"Got {attribute}: {decoded_value}")
-            except Exception as e:
+            except BleakError as e:
                 _LOGGER.error(f"Error reading {attribute}: {e}")
 
     async def _get_battery(self, client: BleakClient, device: SHT31Device) -> None:
@@ -107,15 +107,16 @@ class SHT31BluetoothDeviceData:
         device = SHT31Device()
         _LOGGER.debug("Made Device")
 
-        await self._get_device_info(client, device)
-        device.name = "Sensirion SHT31"
-        device.advertised_name = ble_device.name
-        device.address = ble_device.address
-        _LOGGER.debug("device.name: %s", device.name)
-        _LOGGER.debug("device.advertised_name: %s", device.advertised_name)
-        _LOGGER.debug("device.address: %s", device.address)
-
-        await client.disconnect()
+        try:
+            await self._get_device_info(client, device)
+            device.name = "Sensirion SHT31"
+            device.advertised_name = ble_device.name
+            device.address = ble_device.address
+            _LOGGER.debug("device.name: %s", device.name)
+            _LOGGER.debug("device.advertised_name: %s", device.advertised_name)
+            _LOGGER.debug("device.address: %s", device.address)
+        finally:
+            await client.disconnect()
 
         return device
 
@@ -128,19 +129,22 @@ class SHT31BluetoothDeviceData:
         _LOGGER.debug("Got Client")
         if sht31_device is not None:
             device = sht31_device
+        else:
+            device = SHT31Device()
         _LOGGER.debug("Made Device")
 
-        await self._get_battery(client, device)
-        await self._get_humidity(client, device)
-        await self._get_temperature(client, device)
-        if sht31_device is None:
-            device.name = "Sensirion SHT31"
-            device.advertised_name = ble_device.name
-            device.address = ble_device.address
-        _LOGGER.debug("device.name: %s", device.name)
-        _LOGGER.debug("device.advertised_name: %s", device.advertised_name)
-        _LOGGER.debug("device.address: %s", device.address)
-
-        await client.disconnect()
+        try:
+            await self._get_battery(client, device)
+            await self._get_humidity(client, device)
+            await self._get_temperature(client, device)
+            if sht31_device is None:
+                device.name = "Sensirion SHT31"
+                device.advertised_name = ble_device.name
+                device.address = ble_device.address
+            _LOGGER.debug("device.name: %s", device.name)
+            _LOGGER.debug("device.advertised_name: %s", device.advertised_name)
+            _LOGGER.debug("device.address: %s", device.address)
+        finally:
+            await client.disconnect()
 
         return device

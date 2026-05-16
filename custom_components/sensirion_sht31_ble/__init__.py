@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 import logging
 
-from .ble_sht31 import SHT31BluetoothDeviceData
+from .ble_sht31 import SHT31BluetoothDeviceData, SHT31Device
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
@@ -18,12 +18,13 @@ from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
+type SHT31ConfigEntry = ConfigEntry[DataUpdateCoordinator[SHT31Device]]
+
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> bool:
     """Set up Sensirion SHT31 BLE device from a config entry."""
-    hass.data.setdefault(DOMAIN, {})
     address = entry.unique_id
     assert address is not None
 
@@ -38,7 +39,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _async_update_method():
         """Get data from Sensirion SHT31 BLE."""
         ble_device = bluetooth.async_ble_device_from_address(hass, address)
-        sht31 = SHT31BluetoothDeviceData(_LOGGER)
 
         try:
             data = await sht31.update_device(ble_device, sht31_device=sht31_device)
@@ -57,16 +57,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await coordinator.async_config_entry_first_refresh()
 
-    hass.data[DOMAIN][entry.entry_id] = coordinator
+    entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> bool:
     """Unload a config entry."""
-    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        hass.data[DOMAIN].pop(entry.entry_id)
-
-    return unload_ok
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

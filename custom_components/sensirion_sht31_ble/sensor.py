@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 
 from .ble_sht31 import SHT31Device
-from homeassistant import config_entries
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -25,7 +25,7 @@ from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
 )
 
-from .const import DOMAIN
+type SHT31ConfigEntry = ConfigEntry[DataUpdateCoordinator[SHT31Device]]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,17 +56,15 @@ SENSORS_MAPPING_TEMPLATE: dict[str, SensorEntityDescription] = {
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: config_entries.ConfigEntry,
+    entry: SHT31ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the SHT31 BLE sensors."""
-
-    coordinator: DataUpdateCoordinator[SHT31Device] = hass.data[DOMAIN][entry.entry_id]
-    sensors_mapping = SENSORS_MAPPING_TEMPLATE.copy()
+    coordinator = entry.runtime_data
     entities = []
     _LOGGER.debug("got sensors: %s", coordinator.data.sensors)
     for sensor_type, sensor_value in coordinator.data.sensors.items():
-        if sensor_type not in sensors_mapping:
+        if sensor_type not in SENSORS_MAPPING_TEMPLATE:
             _LOGGER.debug(
                 "Unknown sensor type detected: %s, %s",
                 sensor_type,
@@ -74,10 +72,11 @@ async def async_setup_entry(
             )
             continue
         entities.append(
-            SHT31Sensor(coordinator, coordinator.data, sensors_mapping[sensor_type])
+            SHT31Sensor(coordinator, coordinator.data, SENSORS_MAPPING_TEMPLATE[sensor_type])
         )
 
     async_add_entities(entities)
+
 
 class SHT31Sensor(CoordinatorEntity[DataUpdateCoordinator[SHT31Device]], SensorEntity):
     """Sensirion SHT31 BLE sensors for the device."""
@@ -94,19 +93,13 @@ class SHT31Sensor(CoordinatorEntity[DataUpdateCoordinator[SHT31Device]], SensorE
         super().__init__(coordinator)
         self.entity_description = entity_description
 
-        name = f"{sht31_device.name} {sht31_device.identifier}"
+        self._attr_unique_id = f"{sht31_device.address}_{entity_description.key}"
 
-        self._attr_unique_id = f"{name}_{entity_description.key}"
-
-        self._id = sht31_device.address
         self._attr_device_info = DeviceInfo(
             connections={
-                (
-                    CONNECTION_BLUETOOTH,
-                    sht31_device.address,
-                )
+                (CONNECTION_BLUETOOTH, sht31_device.address)
             },
-            name=name,
+            name=f"{sht31_device.name} {sht31_device.identifier}",
             manufacturer=sht31_device.manufacturer,
             model=sht31_device.model,
             hw_version=sht31_device.hardware_revision,

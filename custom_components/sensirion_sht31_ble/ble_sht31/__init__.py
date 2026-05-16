@@ -1,4 +1,4 @@
-"""Parser for YC01 BLE advertisements."""
+"""Parser for Sensirion SHT31 BLE devices."""
 from __future__ import annotations
 
 from .parser import SHT31BluetoothDeviceData, SHT31Device
