@@ -19,5 +19,19 @@
                 "description": "Choose a device to set up"
             }
         }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "data": {
+                    "battery_poll_interval": "Battery poll interval (seconds)",
+                    "staleness_timeout": "Staleness timeout (seconds)"
+                },
+                "data_description": {
+                    "battery_poll_interval": "How often to read battery level from the device",
+                    "staleness_timeout": "Mark device unavailable if no data received within this time"
+                }
+            }
+        }
     }
 }

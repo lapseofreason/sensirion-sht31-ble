@@ -16,7 +16,14 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import BATTERY_POLL_INTERVAL, DOMAIN, NOTIFICATION_STALENESS_TIMEOUT, UNAVAILABLE_GRACE_PERIOD
+from .const import (
+    CONF_BATTERY_POLL_INTERVAL,
+    CONF_STALENESS_TIMEOUT,
+    DEFAULT_BATTERY_POLL_INTERVAL,
+    DEFAULT_STALENESS_TIMEOUT,
+    DOMAIN,
+    UNAVAILABLE_GRACE_PERIOD,
+)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
@@ -36,6 +43,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
     """Set up Sensirion SHT31 BLE device from a config entry."""
     address = entry.unique_id
     assert address is not None
+
+    battery_poll_interval = entry.options.get(CONF_BATTERY_POLL_INTERVAL, DEFAULT_BATTERY_POLL_INTERVAL)
+    staleness_timeout = entry.options.get(CONF_STALENESS_TIMEOUT, DEFAULT_STALENESS_TIMEOUT)
 
     ble_device = bluetooth.async_ble_device_from_address(hass, address)
     if not ble_device:
@@ -82,16 +92,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
         nonlocal staleness_timer_cancel
         _cancel_staleness_timer()
         staleness_timer_cancel = async_call_later(
-            hass, NOTIFICATION_STALENESS_TIMEOUT, _on_stale
+            hass, staleness_timeout, _on_stale
         )
 
     def _on_stale(_now=None) -> None:
         nonlocal staleness_timer_cancel
         staleness_timer_cancel = None
-        _LOGGER.warning("SHT31 BLE device %s: no notifications received for %ds, marking unavailable", address, NOTIFICATION_STALENESS_TIMEOUT)
+        _LOGGER.warning("SHT31 BLE device %s: no notifications received for %ds, marking unavailable", address, staleness_timeout)
         coordinator.async_set_update_error(
             ConnectionError(f"SHT31 BLE device {address} is unavailable (no data received)")
         )
+        sht31.trigger_reconnect()
 
     def _mark_unavailable(_now=None) -> None:
         nonlocal grace_timer_cancel
@@ -151,11 +162,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
 
     entry.async_on_unload(
         async_track_time_interval(
-            hass, _async_poll_battery, timedelta(seconds=BATTERY_POLL_INTERVAL)
+            hass, _async_poll_battery, timedelta(seconds=battery_poll_interval)
         )
     )
     entry.async_on_unload(_cancel_grace_timer)
     entry.async_on_unload(_cancel_staleness_timer)
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -167,3 +179,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> bo
     result = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     await entry.runtime_data.client.disconnect()
     return result
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: SHT31ConfigEntry) -> None:
+    """Reload the integration when options change."""
+    await hass.config_entries.async_reload(entry.entry_id)

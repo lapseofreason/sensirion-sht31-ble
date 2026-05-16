@@ -120,6 +120,15 @@ class SHT31BluetoothDeviceData:
             self._reconnect_and_resubscribe()
         )
 
+    def trigger_reconnect(self) -> None:
+        """Abandon a possibly-zombie connection and start reconnecting."""
+        if self._shutting_down:
+            return
+        if self._reconnect_task and not self._reconnect_task.done():
+            return
+        self._client = None
+        self._start_reconnect()
+
     async def _reconnect_and_resubscribe(self) -> None:
         attempt = 0
         while not self._shutting_down and attempt < MAX_RECONNECT_ATTEMPTS:
