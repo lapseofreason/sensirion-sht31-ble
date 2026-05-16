@@ -1,0 +1,16 @@
+{
+  "domain": "sensirion_sht31_ble",
+  "name": "Sensirion SHT31 BLE",
+  "bluetooth": [
+    {
+      "local_name": "Smart Humigadget"
+    }
+  ],
+  "codeowners": ["@lapseofreason"],	
+  "config_flow": true,
+  "dependencies": ["bluetooth_adapters"],
+  "documentation": "https://www.github.com/lapseofreason/sensirion-sht31-ble",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/lapseofreason/sensirion-sht31-ble/issues",
+  "version": "0.1"
+}
