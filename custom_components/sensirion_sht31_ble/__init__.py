@@ -62,7 +62,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
     try:
         await sht31.poll_battery(ble_device, sht31_device)
     except Exception:
-        _LOGGER.debug("Initial battery read failed, will retry on next poll", exc_info=True)
+        _LOGGER.debug("%s: initial battery read failed, will retry on next poll", address, exc_info=True)
 
     coordinator: DataUpdateCoordinator[SHT31Device] = DataUpdateCoordinator(
         hass,
@@ -98,6 +98,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
         )
 
     def _mark_unavailable() -> None:
+        _LOGGER.debug("%s: marking unavailable and triggering reconnect", address)
         err = ConnectionError(f"SHT31 BLE device {address} is unavailable (no data received)")
         coordinator.async_set_update_error(err)
         battery_coordinator.async_set_update_error(err)
@@ -113,8 +114,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
         _reset_staleness_timer()
         coordinator.async_set_updated_data(device)
 
+    def _on_battery_updated(device: SHT31Device) -> None:
+        battery_coordinator.async_set_updated_data(device)
+
     def _on_gave_up() -> None:
         def _do_gave_up():
+            _LOGGER.debug("%s: processing gave-up callback on event loop", address)
             _cancel_staleness_timer()
             err = ConnectionError(f"SHT31 BLE device {address} is unavailable")
             coordinator.async_set_update_error(err)
@@ -132,6 +137,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
             _on_notification,
             _resolve_ble_device,
             gave_up_callback=_on_gave_up,
+            battery_callback=_on_battery_updated,
         )
     except Exception as err:
         await sht31.disconnect()
@@ -145,7 +151,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
             await sht31.poll_battery(current_ble_device, sht31_device)
             battery_coordinator.async_set_updated_data(sht31_device)
         except Exception as err:
-            _LOGGER.warning("Unable to fetch battery: %s", err)
+            _LOGGER.warning("SHT31 BLE device %s: unable to fetch battery: %s", address, err)
 
     entry.runtime_data = SHT31RuntimeData(coordinator=coordinator, battery_coordinator=battery_coordinator, client=sht31)
 
@@ -159,6 +165,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    _LOGGER.debug("%s: setup complete (battery=%s)", address, "battery" in sht31_device.sensors)
     return True
 
 
