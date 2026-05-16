@@ -22,7 +22,6 @@ from .const import (
     DEFAULT_BATTERY_POLL_INTERVAL,
     DEFAULT_STALENESS_TIMEOUT,
     DOMAIN,
-    UNAVAILABLE_GRACE_PERIOD,
 )
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
@@ -33,6 +32,7 @@ _LOGGER = logging.getLogger(__name__)
 @dataclasses.dataclass
 class SHT31RuntimeData:
     coordinator: DataUpdateCoordinator[SHT31Device]
+    battery_coordinator: DataUpdateCoordinator[SHT31Device]
     client: SHT31BluetoothDeviceData
 
 
@@ -73,14 +73,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
     )
     coordinator.async_set_updated_data(sht31_device)
 
-    grace_timer_cancel: CALLBACK_TYPE | None = None
-    staleness_timer_cancel: CALLBACK_TYPE | None = None
+    battery_coordinator: DataUpdateCoordinator[SHT31Device] = DataUpdateCoordinator(
+        hass,
+        _LOGGER,
+        name=f"{DOMAIN}_{address}_battery",
+        update_method=None,
+        update_interval=None,
+    )
+    battery_coordinator.async_set_updated_data(sht31_device)
 
-    def _cancel_grace_timer() -> None:
-        nonlocal grace_timer_cancel
-        if grace_timer_cancel is not None:
-            grace_timer_cancel()
-            grace_timer_cancel = None
+    staleness_timer_cancel: CALLBACK_TYPE | None = None
 
     def _cancel_staleness_timer() -> None:
         nonlocal staleness_timer_cancel
@@ -95,41 +97,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
             hass, staleness_timeout, _on_stale
         )
 
+    def _mark_unavailable() -> None:
+        err = ConnectionError(f"SHT31 BLE device {address} is unavailable (no data received)")
+        coordinator.async_set_update_error(err)
+        battery_coordinator.async_set_update_error(err)
+        sht31.trigger_reconnect()
+
     def _on_stale(_now=None) -> None:
         nonlocal staleness_timer_cancel
         staleness_timer_cancel = None
         _LOGGER.warning("SHT31 BLE device %s: no notifications received for %ds, marking unavailable", address, staleness_timeout)
-        coordinator.async_set_update_error(
-            ConnectionError(f"SHT31 BLE device {address} is unavailable (no data received)")
-        )
-        sht31.trigger_reconnect()
-
-    def _mark_unavailable(_now=None) -> None:
-        nonlocal grace_timer_cancel
-        grace_timer_cancel = None
-        coordinator.async_set_update_error(
-            ConnectionError(f"SHT31 BLE device {address} is unavailable")
-        )
+        hass.loop.call_soon_threadsafe(_mark_unavailable)
 
     def _on_notification(device: SHT31Device) -> None:
-        _cancel_grace_timer()
         _reset_staleness_timer()
         coordinator.async_set_updated_data(device)
 
-    def _on_disconnect() -> None:
-        nonlocal grace_timer_cancel
-        _LOGGER.warning("SHT31 BLE disconnected, attempting reconnect")
-        _cancel_staleness_timer()
-        if grace_timer_cancel is None:
-            grace_timer_cancel = async_call_later(
-                hass, UNAVAILABLE_GRACE_PERIOD, _mark_unavailable
-            )
-
     def _on_gave_up() -> None:
-        _cancel_grace_timer()
-        _cancel_staleness_timer()
-        _mark_unavailable()
-        _LOGGER.error("SHT31 BLE device %s: reconnect attempts exhausted", address)
+        def _do_gave_up():
+            _cancel_staleness_timer()
+            err = ConnectionError(f"SHT31 BLE device {address} is unavailable")
+            coordinator.async_set_update_error(err)
+            battery_coordinator.async_set_update_error(err)
+            _LOGGER.error("SHT31 BLE device %s: reconnect attempts exhausted", address)
+        hass.loop.call_soon_threadsafe(_do_gave_up)
 
     def _resolve_ble_device():
         return bluetooth.async_ble_device_from_address(hass, address)
@@ -140,8 +131,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
             sht31_device,
             _on_notification,
             _resolve_ble_device,
-            _on_disconnect,
-            _on_gave_up,
+            gave_up_callback=_on_gave_up,
         )
     except Exception as err:
         await sht31.disconnect()
@@ -150,22 +140,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
     _reset_staleness_timer()
 
     async def _async_poll_battery(_now=None):
-        """Poll battery level on a fixed interval."""
         current_ble_device = bluetooth.async_ble_device_from_address(hass, address)
         try:
             await sht31.poll_battery(current_ble_device, sht31_device)
-            coordinator.async_set_updated_data(sht31_device)
+            battery_coordinator.async_set_updated_data(sht31_device)
         except Exception as err:
             _LOGGER.warning("Unable to fetch battery: %s", err)
 
-    entry.runtime_data = SHT31RuntimeData(coordinator=coordinator, client=sht31)
+    entry.runtime_data = SHT31RuntimeData(coordinator=coordinator, battery_coordinator=battery_coordinator, client=sht31)
 
     entry.async_on_unload(
         async_track_time_interval(
             hass, _async_poll_battery, timedelta(seconds=battery_poll_interval)
         )
     )
-    entry.async_on_unload(_cancel_grace_timer)
     entry.async_on_unload(_cancel_staleness_timer)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 

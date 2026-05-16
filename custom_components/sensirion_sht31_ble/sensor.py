@@ -1,8 +1,6 @@
 """Support for Sensirion SHT31 BLE sensors."""
 from __future__ import annotations
 
-import logging
-
 from .ble_sht31 import SHT31Device
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -28,8 +26,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from . import SHT31ConfigEntry
-
-_LOGGER = logging.getLogger(__name__)
 
 SENSORS_MAPPING_TEMPLATE: dict[str, SensorEntityDescription] = {
     "temperature": SensorEntityDescription(
@@ -63,19 +59,17 @@ async def async_setup_entry(
 ) -> None:
     """Set up the SHT31 BLE sensors."""
     coordinator = entry.runtime_data.coordinator
+    battery_coordinator = entry.runtime_data.battery_coordinator
     entities = []
-    _LOGGER.debug("got sensors: %s", coordinator.data.sensors)
-    for sensor_type, sensor_value in coordinator.data.sensors.items():
-        if sensor_type not in SENSORS_MAPPING_TEMPLATE:
-            _LOGGER.debug(
-                "Unknown sensor type detected: %s, %s",
-                sensor_type,
-                sensor_value,
+    for sensor_type, description in SENSORS_MAPPING_TEMPLATE.items():
+        if sensor_type == "battery":
+            entities.append(
+                SHT31Sensor(battery_coordinator, coordinator.data, description)
             )
-            continue
-        entities.append(
-            SHT31Sensor(coordinator, coordinator.data, SENSORS_MAPPING_TEMPLATE[sensor_type])
-        )
+        else:
+            entities.append(
+                SHT31Sensor(coordinator, coordinator.data, description)
+            )
 
     async_add_entities(entities)
 
@@ -94,6 +88,9 @@ class SHT31Sensor(CoordinatorEntity[DataUpdateCoordinator[SHT31Device]], SensorE
         """Populate the SHT31 entity with relevant data."""
         super().__init__(coordinator)
         self.entity_description = entity_description
+
+        if entity_description.key == "battery":
+            self._attr_force_update = True
 
         self._attr_unique_id = f"{sht31_device.address}_{entity_description.key}"
 
