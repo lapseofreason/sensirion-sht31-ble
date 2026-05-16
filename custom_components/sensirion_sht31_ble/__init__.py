@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from datetime import timedelta
 import logging
@@ -114,6 +115,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
     def _on_battery_updated(device: SHT31Device) -> None:
         battery_coordinator.async_set_updated_data(device)
 
+    def _on_reconnected() -> None:
+        if not battery_coordinator.last_update_success:
+            asyncio.ensure_future(_poll_battery_after_reconnect())
+
+    async def _poll_battery_after_reconnect() -> None:
+        current_ble_device = bluetooth.async_ble_device_from_address(hass, address)
+        try:
+            await sht31.poll_battery(current_ble_device, sht31_device)
+        except Exception as err:
+            _LOGGER.debug("%s: battery read after reconnect failed: %s", address, err)
+
     def _on_gave_up() -> None:
         def _do_gave_up():
             _cancel_grace_timer()
@@ -133,6 +145,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SHT31ConfigEntry) -> boo
             gave_up_callback=_on_gave_up,
             battery_callback=_on_battery_updated,
             disconnect_callback=_on_disconnected,
+            reconnected_callback=_on_reconnected,
         )
     except Exception as err:
         await sht31.disconnect()

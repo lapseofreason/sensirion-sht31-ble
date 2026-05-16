@@ -61,6 +61,7 @@ class SHT31BluetoothDeviceData:
         self._notify_callback: Callable[[SHT31Device], None] | None = None
         self._battery_callback: Callable[[SHT31Device], None] | None = None
         self._disconnect_callback: Callable[[], None] | None = None
+        self._reconnected_callback: Callable[[], None] | None = None
         self._gave_up_callback: Callable[[], None] | None = None
         self._device: SHT31Device | None = None
         self._ble_device_resolver: Callable[[], BLEDevice | None] | None = None
@@ -140,6 +141,8 @@ class SHT31BluetoothDeviceData:
                 await self._subscribe(ble_device, self._device)
                 if self._notify_callback:
                     self._notify_callback(self._device)
+                if self._reconnected_callback:
+                    self._reconnected_callback()
                 _LOGGER.info("Reconnected to %s (attempt %d/%d)", self._address, attempt, MAX_RECONNECT_ATTEMPTS)
                 return
             except Exception as err:
@@ -241,6 +244,7 @@ class SHT31BluetoothDeviceData:
         gave_up_callback: Callable[[], None] | None = None,
         battery_callback: Callable[[SHT31Device], None] | None = None,
         disconnect_callback: Callable[[], None] | None = None,
+        reconnected_callback: Callable[[], None] | None = None,
     ) -> None:
         """Subscribe to temperature and humidity notifications.
 
@@ -252,6 +256,7 @@ class SHT31BluetoothDeviceData:
         self._notify_callback = notify_callback
         self._battery_callback = battery_callback
         self._disconnect_callback = disconnect_callback
+        self._reconnected_callback = reconnected_callback
         self._gave_up_callback = gave_up_callback
 
         client = await self._ensure_connected(ble_device)
